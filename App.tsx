@@ -1,9 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, FileAudio, Download, Play, Pause, Loader2, Sparkles, AlertCircle, Wand2 } from 'lucide-react';
-import { SubtitleChunk, GenerationState } from './types';
+import { Upload, FileAudio, Download, Loader2, Sparkles, AlertCircle, Wand2, History as HistoryIcon } from 'lucide-react';
+import { SubtitleChunk, GenerationState, HistoryItem } from './types';
 import { transcribeAudio, autoFormatSubtitles } from './services/geminiService';
 import { generateSRT, downloadSRT, timeStringToSeconds, secondsToTimeString } from './utils/timeUtils';
+import { saveHistoryItem, getHistory, deleteHistoryItem } from './utils/storageUtils';
 import SubtitleItem from './components/SubtitleItem';
+import HistoryModal from './components/HistoryModal';
 
 const App: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
@@ -13,8 +15,17 @@ const App: React.FC = () => {
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeSubtitleId, setActiveSubtitleId] = useState<number | null>(null);
+  
+  // History State
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  // Load history on mount
+  useEffect(() => {
+    setHistory(getHistory());
+  }, []);
 
   // Clean up object URL
   useEffect(() => {
@@ -46,6 +57,9 @@ const App: React.FC = () => {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
       setFile(selectedFile);
       setAudioUrl(URL.createObjectURL(selectedFile));
+      
+      // Only clear subtitles if we are not currently in a success state or if the user explicitly wants to start over.
+      // For simplicity, we reset subtitles on new file upload to avoid mismatch.
       setSubtitles([]);
       setGenState({ status: 'idle' });
     }
@@ -59,6 +73,11 @@ const App: React.FC = () => {
       const data = await transcribeAudio(file);
       setSubtitles(data);
       setGenState({ status: 'success' });
+      
+      // Save to history
+      const updatedHistory = saveHistoryItem(file.name, data);
+      setHistory(updatedHistory);
+
     } catch (error) {
       console.error(error);
       setGenState({ status: 'error', message: 'Failed to transcribe audio. Please check your API key and file format.' });
@@ -73,6 +92,15 @@ const App: React.FC = () => {
         const formatted = await autoFormatSubtitles(subtitles);
         setSubtitles(formatted);
         setGenState({ status: 'success' });
+        
+        // Optionally update history with the formatted version? 
+        // For now, we leave the original in history or we could update it. 
+        // Let's create a NEW history entry for the formatted version to be safe.
+        if (file) {
+            const updatedHistory = saveHistoryItem(`${file.name} (PUEBI)`, formatted);
+            setHistory(updatedHistory);
+        }
+
     } catch (error) {
         console.error(error);
         setGenState({ status: 'error', message: 'Failed to auto-format subtitles.' });
@@ -89,7 +117,6 @@ const App: React.FC = () => {
     setSubtitles(prev => prev.filter(sub => sub.id !== id));
   }, []);
 
-  // Split subtitle based on cursor position using linear interpolation for time
   const handleSplitSubtitle = useCallback((id: number, cursorPosition: number) => {
     setSubtitles(prev => {
       const index = prev.findIndex(s => s.id === id);
@@ -98,26 +125,21 @@ const App: React.FC = () => {
       const original = prev[index];
       const textLen = original.text.length;
       
-      // Safety check to prevent division by zero or invalid splits
       if (textLen === 0 || cursorPosition <= 0 || cursorPosition >= textLen) {
         return prev; 
       }
 
-      // Calculate new time
       const startTime = timeStringToSeconds(original.startTime);
       const endTime = timeStringToSeconds(original.endTime);
       const duration = endTime - startTime;
       
-      // Proportional split
       const ratio = cursorPosition / textLen;
       const splitTimeSeconds = startTime + (duration * ratio);
       const splitTimeString = secondsToTimeString(splitTimeSeconds);
 
-      // Create new chunks
       const firstChunkText = original.text.substring(0, cursorPosition).trim();
       const secondChunkText = original.text.substring(cursorPosition).trim();
 
-      // Generate a unique ID (max existing ID + 1 to ensure uniqueness)
       const newId = Math.max(...prev.map(s => s.id), 0) + 1;
 
       const updatedOriginal: SubtitleChunk = {
@@ -133,7 +155,6 @@ const App: React.FC = () => {
         text: secondChunkText
       };
 
-      // Insert new chunk after the original
       const newSubtitles = [...prev];
       newSubtitles[index] = updatedOriginal;
       newSubtitles.splice(index + 1, 0, newChunk);
@@ -150,9 +171,7 @@ const App: React.FC = () => {
 
     if (lastSub) {
       newId = Math.max(...subtitles.map(s => s.id), 0) + 1;
-      // Simple logic to start where last ended
       newStart = lastSub.endTime; 
-      // Add 2 seconds default
       const startSec = timeStringToSeconds(newStart);
       newEnd = secondsToTimeString(startSec + 2);
     }
@@ -179,25 +198,36 @@ const App: React.FC = () => {
     }
   };
 
-  const togglePlay = () => {
-    if (audioRef.current) {
-      if (isPlaying) {
-        audioRef.current.pause();
-      } else {
-        audioRef.current.play();
-      }
-      setIsPlaying(!isPlaying);
-    }
-  };
-
   const onTimeUpdate = () => {
     if (audioRef.current) {
       setCurrentTime(audioRef.current.currentTime);
     }
   };
+  
+  // History Handlers
+  const handleLoadHistory = (item: HistoryItem) => {
+      setSubtitles(item.subtitles);
+      // We cannot restore the audio file blob, but we can restore the name roughly or just show placeholder
+      setGenState({ status: 'success' });
+      // Note: User needs to re-upload audio if they want to play it, but text is loaded.
+      alert("Subtitles loaded! Please re-upload the audio file if you wish to play/sync audio.");
+  };
+
+  const handleDeleteHistory = (id: string) => {
+      const updated = deleteHistoryItem(id);
+      setHistory(updated);
+  };
 
   return (
     <div className="flex flex-col h-screen bg-slate-950 text-slate-200 font-sans">
+      <HistoryModal 
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        history={history}
+        onLoad={handleLoadHistory}
+        onDelete={handleDeleteHistory}
+      />
+
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/50">
         <div className="flex items-center gap-3">
@@ -205,11 +235,19 @@ const App: React.FC = () => {
             <Sparkles className="text-white w-5 h-5" />
           </div>
           <div>
-             <h1 className="text-xl font-bold text-white tracking-tight">SubGen AI</h1>
-             <p className="text-xs text-slate-400">Audio to SRT Generator</p>
+             <h1 className="text-xl font-bold text-white tracking-tight">SUB GEN V.1</h1>
+             <p className="text-xs text-slate-400">Ioda Academy Tools SRT Generator</p>
           </div>
         </div>
         <div className="flex items-center gap-4">
+             <button 
+               onClick={() => setIsHistoryOpen(true)}
+               className="p-2 text-slate-400 hover:text-indigo-400 hover:bg-slate-800 rounded-lg transition-colors"
+               title="History"
+             >
+                <HistoryIcon size={20} />
+             </button>
+             
              {subtitles.length > 0 && (
                 <>
                     <button
@@ -223,7 +261,7 @@ const App: React.FC = () => {
                         ) : (
                             <Wand2 size={16} />
                         )}
-                        Auto PUEBI (Italicize English)
+                        Auto PUEBI
                     </button>
                     <button 
                     onClick={handleDownload}

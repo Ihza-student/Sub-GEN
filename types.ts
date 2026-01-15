@@ -9,3 +9,10 @@ export interface GenerationState {
   status: 'idle' | 'uploading' | 'transcribing' | 'formatting' | 'success' | 'error';
   message?: string;
 }
+
+export interface HistoryItem {
+  id: string;
+  fileName: string;
+  timestamp: number;
+  subtitles: SubtitleChunk[];
+}
